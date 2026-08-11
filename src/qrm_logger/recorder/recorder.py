@@ -16,15 +16,26 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import threading
 import time
 
 from gnuradio import gr
 
 from qrm_logger.core.config_manager import get_config_manager
-from qrm_logger.config.recording_params import frequency_change_delay_sec, frame_rate_default
+from qrm_logger.config.recording_params import (
+    frequency_change_delay_sec,
+    frame_rate_default,
+    capture_timeout_margin_sec,
+)
 from qrm_logger.config.sdr_hardware import device_name
 from qrm_logger.core.objects import RecordingStatus, CaptureRun
 from qrm_logger.recorder.fft_receiver import fft_receiver
+
+
+# Safety limit for the GNU Radio flowgraph shutdown. Stopping a device that is
+# already gone can block in wait(), which would hang the recording thread in the
+# very situation the teardown is meant to recover from.
+sdr_stop_timeout_sec = 15
 
 
 class Recorder:
@@ -162,8 +173,18 @@ class Recorder:
 
     def _stop_receiver_internal(self):
         logging.info(f"Stopping SDR ({device_name})...")
-        self.receiver.stop()
-        self.receiver.wait()
+        receiver = self.receiver
+
+        def _stop_and_wait():
+            receiver.stop()
+            receiver.wait()
+
+        stopper = threading.Thread(target=_stop_and_wait, name="sdr-stop", daemon=True)
+        stopper.start()
+        stopper.join(sdr_stop_timeout_sec)
+        if stopper.is_alive():
+            # Let on_record_end() drop the receiver, so the next run builds a fresh one
+            raise RuntimeError(f"SDR did not stop within {sdr_stop_timeout_sec} s")
 
     def _disconnect_internal(self):
         logging.info(f"Shutting down SDR ({device_name})...")
@@ -248,29 +269,61 @@ class Recorder:
         """
         status.jobs_total_number = len(runs)
         number = 0
-        for run in runs:
-            if self._check_if_stopped():
-                break
-
-            self.receiver.set_frequency(run.freq)
-            self.receiver.set_sample_rate(run.span)
-
-            time.sleep(frequency_change_delay_sec)
-
-            self.receiver.fft_record_sink.start_record(run)
-
-            while self.receiver.fft_record_sink.is_recording:
+        try:
+            for run in runs:
                 if self._check_if_stopped():
                     break
-                time.sleep(0.1)
 
-            number = number + 1
-            status.current_job_number = number
+                self.receiver.set_frequency(run.freq)
+                self.receiver.set_sample_rate(run.span)
 
-        cancelled = self.stop_requested
-        # Reset the flag for future batches
-        self.stop_requested = False
-        return not cancelled
+                time.sleep(frequency_change_delay_sec)
+
+                self.receiver.fft_record_sink.start_record(run)
+                self._wait_for_run(run)
+
+                number = number + 1
+                status.current_job_number = number
+
+            cancelled = self.stop_requested
+            return not cancelled
+        finally:
+            # Reset the flag for future batches, also when a run raised
+            self.stop_requested = False
+
+    def _wait_for_run(self, run):
+        """Wait for a capture run to finish, or raise if the SDR goes silent.
+
+        The sink only leaves the recording state while it receives samples, so a
+        device that disappears mid-run (USB unplug, driver error) never ends the
+        run and never raises: librtlsdr reports the failure on its own thread and
+        the source block simply stops producing. The deadline is what turns that
+        silence into an error.
+        """
+        deadline = time.monotonic() + run.rec_time_ms / 1000.0 + capture_timeout_margin_sec
+
+        while self.receiver.fft_record_sink.is_recording:
+            if self._check_if_stopped():
+                return
+            if time.monotonic() > deadline:
+                self._abort_stalled_run(run)
+            time.sleep(0.1)
+
+    def _abort_stalled_run(self, run):
+        message = (
+            f"SDR delivered no data for {run.id} within "
+            f"{round(run.rec_time_ms / 1000.0 + capture_timeout_margin_sec, 1)} s "
+            f"- device stalled or disconnected"
+        )
+        logging.error(message)
+        self.error_text = message
+        try:
+            # Release the sink, so it does not stay armed for the next run
+            self.receiver.fft_record_sink.stop_now()
+        except Exception as e:
+            logging.error(f"failed to stop sink after stall: {e}")
+        # Abort the batch: the remaining runs would hit the same dead device
+        raise RuntimeError(message)
 
 
     def _check_if_stopped(self):
