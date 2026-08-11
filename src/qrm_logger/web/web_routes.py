@@ -75,7 +75,8 @@ def status():
             record_progress = str(stat.operation) + " [" + str(stat.current_job_number) + "/" + str(
                 stat.jobs_total_number) + "]"
 
-    error_text = get_recorder().get_error_text()
+    # Pipeline errors first (most recent), SDR errors as fallback
+    error_text = p.get_error_text() or get_recorder().get_error_text()
 
     sch = get_scheduler()
     next_scheduled = sch.get_next_scheduled_time()

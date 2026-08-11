@@ -90,7 +90,9 @@ class Pipeline:
         self.recording = True
         self.record_start_time = time.time()
         self.recording_status = RecordingStatus()
+        # Drop the error of the previous run, so the UI only shows current ones
         self.error_text = None
+        get_recorder().clear_error()
 
         # Populate capture params
         counter = inc_counter()
@@ -144,14 +146,16 @@ class Pipeline:
             if not success:
                 return
 
-            if status.cancel_requested:
-                logging.info("Recording cancelled")
+            sets_recorded = []
+            try:
+                if status.cancel_requested:
+                    logging.info("Recording cancelled")
+                    return
+
+                sets_recorded, cancelled = get_recorder().execute_recordings(status, sets_to_record, capture_params)
+            finally:
+                # Always release the SDR, also when recording raised
                 get_recorder().on_record_end()
-                return
-
-            sets_recorded, cancelled = get_recorder().execute_recordings(status, sets_to_record, capture_params)
-
-            get_recorder().on_record_end()
 
             if cancelled or status.cancel_requested:
                 logging.info("Processing cancelled")
@@ -169,6 +173,7 @@ class Pipeline:
             logging.error(f"Pipeline failed during execution: {str(e)}")
             logging.error(traceback.format_exc())
             status.operation = "ERROR"
+            self.error_text = str(e) or type(e).__name__
             raise
         finally:
             clear_all_collected_log_texts()

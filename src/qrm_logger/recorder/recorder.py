@@ -56,21 +56,37 @@ class Recorder:
     def get_error_text(self):
         return self.error_text
 
+    def clear_error(self):
+        self.error_text = None
+
     def on_record_start(self):
+        # Flagged as busy right away, so that the SDR cannot be shut down while starting up
         self.recording = True
-        if not self.receiver:
-            success = self.create_receiver()
-            if not success:
-                return False
-        return self.start_receiver()
+        started = False
+        try:
+            if not self.receiver:
+                if not self.create_receiver():
+                    return False
+            started = self.start_receiver()
+            return started
+        finally:
+            if not started:
+                # Startup failed: do not leave the recorder flagged as busy
+                self.recording = False
 
     def on_record_end(self):
         logging.info("Recording session complete")
-        self.stop_receiver()
-        if get_config_manager().get("sdr_shutdown_after_recording", True):
-            self.disconnect_receiver()
-
-        self.recording = False
+        try:
+            self.stop_receiver()
+            if get_config_manager().get("sdr_shutdown_after_recording", True):
+                self.disconnect_receiver()
+        except Exception as e:
+            # Do not mask the error that ended the recording; drop the receiver
+            # so the next run creates a fresh one instead of reusing a broken flowgraph
+            logging.error(f"Failed to shut down SDR cleanly: {e}")
+            self.receiver = None
+        finally:
+            self.recording = False
 
 
     def create_receiver(self):
@@ -95,7 +111,6 @@ class Recorder:
         except Exception as ex:
             logging.error("could not start SDR: "+str(ex))
             self.error_text = str(ex)
-            self.recording = False
             self.receiver = None
             raise
         return success
@@ -139,6 +154,7 @@ class Recorder:
             self.receiver.start()
         except Exception as e:
             logging.error(f"Failed to start SDR: {e}")
+            self.error_text = "Failed to start SDR: " + (str(e) or type(e).__name__)
             return False
         return True
 
