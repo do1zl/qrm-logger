@@ -62,6 +62,10 @@ frame_rate_default = 25
 # Recommended values: RTLSDR 0.5, SDRplay 2
 frequency_change_delay_sec = 0.5
 
+# Extra time granted to a capture run before the SDR is considered stalled (seconds)
+# Catches a device that stops delivering samples, e.g. after being unplugged
+capture_timeout_margin_sec = 10
+
 [recording.fft]
 # FFT size for spectrum analysis (must be power of 2)
 # Higher values = better frequency resolution but slower processing

@@ -37,6 +37,12 @@ frame_rate_default = _toml["recording"]["frame_rate_default"]
 # Recommended values: RTLSDR 0.5, SDRplay 2
 frequency_change_delay_sec = _toml["recording"]["frequency_change_delay_sec"]
 
+# Extra time granted to a capture run on top of its recording duration before the
+# SDR is considered stalled. A device that disappears mid-recording (USB unplug,
+# driver error) stops delivering samples without raising anything, so this timeout
+# is the only way the recording loop notices.
+capture_timeout_margin_sec = _toml["recording"].get("capture_timeout_margin_sec", 10)
+
 # =============================================================================
 # FFT CONFIGURATION
 # =============================================================================
